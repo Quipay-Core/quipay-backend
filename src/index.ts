@@ -3,9 +3,6 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { metricsManager } from "./metrics";
 import { webhookRouter } from "./webhooks";
-import { slackRouter } from "./slack";
-import { discordRouter } from "./discord";
-import { aiRouter } from "./ai";
 import { adminRouter } from "./adminRouter";
 import { analyticsRouter } from "./analytics";
 import { docsRouter } from "./swagger";
@@ -27,6 +24,7 @@ import {
 import { streamsRouter } from "./routes/streams";
 import { payslipsRouter } from "./routes/payslips";
 import { brandingRouter } from "./routes/branding";
+import { workersRouter } from "./routes/workers";
 import { keyRotationScheduler } from "./services/keyRotationScheduler";
 import {
   initWebSocketServer,
@@ -175,10 +173,6 @@ app.post("/csp-report", (req, res) => {
 });
 
 app.use("/webhooks", webhookRouter);
-app.use("/slack", slackRouter);
-// Note: discordRouter utilizes native express payloads natively bypassing body buffers mapping local examples
-app.use("/discord", discordRouter);
-app.use("/ai", aiRouter);
 app.use("/admin", adminRouter); // RBAC-protected admin endpoints
 app.use("/analytics", analyticsRouter);
 app.use("/api/analytics", analyticsRouter);
@@ -190,6 +184,8 @@ app.use("/stellar", stellarRouter);
 app.use("/reports", reportsRouter);
 app.use("/streams", streamsRouter);
 app.use("/api/streams", streamsRouter);
+app.use("/workers", workersRouter);       // mobile app worker API
+app.use("/api/v1/workers", workersRouter);
 app.use("/api/workers", payslipsRouter);
 app.use("/api", payslipsRouter); // For /api/verify-signature
 app.use("/api/employers", brandingRouter);
