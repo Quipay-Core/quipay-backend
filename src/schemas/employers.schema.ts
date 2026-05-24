@@ -10,6 +10,10 @@ export const employerOnboardingSchema = z.object({
     .transform((value) => value.toUpperCase()),
   contactName: z.string().trim().min(2).max(120).optional(),
   contactEmail: z.string().trim().email().max(320).optional(),
+  stellarAddress: z
+    .string()
+    .trim()
+    .regex(/^G[A-Z2-7]{55}$/, "Must be a valid Stellar public key (G...)"),
 });
 
 export const employerTreasuryDepositSchema = z.object({

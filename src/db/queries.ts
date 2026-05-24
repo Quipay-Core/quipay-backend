@@ -52,6 +52,7 @@ export interface EmployerRecord {
   country_code: string;
   contact_name: string | null;
   contact_email: string | null;
+  stellar_address: string;
   verification_status: EmployerVerificationStatus;
   verification_reason: string | null;
   verification_metadata: Record<string, unknown>;
@@ -868,6 +869,7 @@ export const upsertEmployerVerification = async (params: {
   countryCode: string;
   contactName?: string;
   contactEmail?: string;
+  stellarAddress: string;
   verificationStatus: EmployerVerificationStatus;
   verificationReason: string | null;
   verificationMetadata: Record<string, unknown>;
@@ -884,19 +886,21 @@ export const upsertEmployerVerification = async (params: {
         country_code,
         contact_name,
         contact_email,
+        stellar_address,
         verification_status,
         verification_reason,
         verification_metadata,
         verified_at,
         updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
       ON CONFLICT (employer_id) DO UPDATE
         SET business_name = EXCLUDED.business_name,
             registration_number = EXCLUDED.registration_number,
             country_code = EXCLUDED.country_code,
             contact_name = EXCLUDED.contact_name,
             contact_email = EXCLUDED.contact_email,
+            stellar_address = EXCLUDED.stellar_address,
             verification_status = EXCLUDED.verification_status,
             verification_reason = EXCLUDED.verification_reason,
             verification_metadata = EXCLUDED.verification_metadata,
@@ -910,6 +914,7 @@ export const upsertEmployerVerification = async (params: {
       params.countryCode,
       params.contactName ?? null,
       params.contactEmail ?? null,
+      params.stellarAddress,
       params.verificationStatus,
       params.verificationReason,
       params.verificationMetadata,

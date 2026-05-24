@@ -15,6 +15,13 @@
       "when": 1777205516286,
       "tag": "0001_colossal_khan",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1779613218656,
+      "tag": "0002_serious_wallow",
+      "breakpoints": true
     }
   ]
 }

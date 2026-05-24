@@ -43,5 +43,12 @@ export function createCorsOptions(allowedOrigins: string[]): CorsOptions {
       return callback(new CorsForbiddenError());
     },
     credentials: true,
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "x-user-id",
+      "x-user-role",
+      "x-idempotency-key",
+    ],
   };
 }

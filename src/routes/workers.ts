@@ -1,184 +1,197 @@
 import { Router } from "express";
 import { requirePrivyAuth } from "../middleware/privyAuth";
 import { getWorkerStreamsBase, getStreamBase } from "../services/baseChain";
-import { db } from "../db/pool";
+import { getWorkerStreamsStellar } from "../services/stellarChain";
+import { query } from "../db/pool";
 import { logger } from "../logger";
 
 export const workersRouter = Router();
-
-// All worker routes require Privy auth
 workersRouter.use(requirePrivyAuth);
 
 /**
  * GET /workers/me/streams
- * Returns all active streams for the authenticated worker across all chains.
- * Merges Stellar (from DB) + Base (live from chain).
+ * All active streams across Stellar + Base for the logged-in worker.
+ * Stellar streams are read directly from the Soroban contract (not the DB sync table).
  */
 workersRouter.get("/me/streams", async (req, res) => {
   try {
     const privyId = req.privyUser!.sub;
 
-    // Lookup worker's on-chain addresses from DB
-    const worker = await db.query(
+    const workerResult = await query(
       `SELECT wallet_stellar, wallet_base FROM workers WHERE privy_id = $1 LIMIT 1`,
       [privyId]
     );
 
-    if (!worker.rows.length) {
+    if (!workerResult.rows.length) {
       res.json({ streams: [], totalAvailableUSDC: 0 });
       return;
     }
 
-    const { wallet_stellar, wallet_base } = worker.rows[0];
+    const { wallet_stellar, wallet_base } = workerResult.rows[0];
     const now = Math.floor(Date.now() / 1000);
 
-    // ── Stellar streams (from synced DB) ──────────────────────────────────
-    const stellarStreams = wallet_stellar
-      ? await db.query(
-          `SELECT stream_id, employer_address, worker_address, token,
-                  rate_per_second, start_ts, end_ts, cliff_ts,
-                  total_withdrawn, status, chain
-           FROM payroll_streams
-           WHERE worker_address = $1 AND status = 'active'`,
-          [wallet_stellar]
-        )
-      : { rows: [] };
-
-    const stellarFormatted = stellarStreams.rows.map((s: any) => {
-      const elapsed = Math.max(0, now - s.start_ts);
-      const vested  = elapsed * s.rate_per_second;
-      const available = Math.max(0, vested - (s.total_withdrawn ?? 0));
-      return {
-        streamId:       s.stream_id,
-        chain:          "stellar",
-        employer:       s.employer_address,
-        ratePerSecond:  s.rate_per_second,
-        startTs:        s.start_ts,
-        endTs:          s.end_ts,
-        cliffTs:        s.cliff_ts,
-        available:      parseFloat(available.toFixed(6)),
-        token:          "USDC",
-        status:         s.status,
-      };
-    });
-
-    // ── Base streams (live from chain) ────────────────────────────────────
-    let baseFormatted: any[] = [];
-    if (wallet_base) {
-      const baseStreamIds = await getWorkerStreamsBase(wallet_base as `0x${string}`);
-      const baseDetails = await Promise.all(
-        baseStreamIds.map(id => getStreamBase(id as `0x${string}`))
-      );
-      baseFormatted = baseDetails
-        .filter(Boolean)
-        .filter((s: any) => !s.cancelled)
-        .map((s: any) => ({
-          streamId:      s.streamId,
-          chain:         "base",
-          employer:      s.employer,
-          ratePerSecond: s.ratePerSecond,
-          startTs:       s.startTs,
-          endTs:         s.endTs,
-          cliffTs:       s.cliffTs,
-          available:     s.available,
-          token:         "USDC",
-          status:        "active",
-        }));
+    // ── Stellar streams (live from Soroban contract) ──────────────────────
+    let stellarStreams: any[] = [];
+    if (wallet_stellar) {
+      try {
+        const { streams } = await getWorkerStreamsStellar(wallet_stellar);
+        stellarStreams = streams.map(s => {
+          const effectiveCliff = s.cliffTs > 0 ? s.cliffTs : s.startTs;
+          const elapsed  = Math.max(0, now - s.startTs);
+          const vested   = Math.min(elapsed * s.ratePerSecond, s.totalAmount);
+          const available = now >= effectiveCliff
+            ? Math.max(0, vested - s.withdrawnAmount)
+            : 0;
+          return {
+            streamId:      s.streamId,
+            chain:         "stellar",
+            employer:      s.employer,
+            ratePerSecond: parseFloat(s.ratePerSecond.toFixed(8)),
+            startTs:       s.startTs,
+            endTs:         s.endTs,
+            cliffTs:       s.cliffTs,
+            available:     parseFloat(available.toFixed(6)),
+            withdrawn:     parseFloat(s.withdrawnAmount.toFixed(6)),
+            token:         "USDC",
+            status:        s.status === 0 ? "active" : s.status === 1 ? "cancelled" : "completed",
+          };
+        });
+      } catch (err) {
+        logger.warn({ err }, "Stellar chain read failed");
+      }
     }
 
-    const allStreams = [...stellarFormatted, ...baseFormatted];
-    const totalAvailable = allStreams.reduce((sum, s) => sum + s.available, 0);
+    // ── Base streams (live from chain via viem) ───────────────────────────
+    let baseStreams: any[] = [];
+    if (wallet_base) {
+      try {
+        const ids     = await getWorkerStreamsBase(wallet_base as `0x${string}`);
+        const details = await Promise.all(ids.map(id => getStreamBase(id)));
+        baseStreams   = details
+          .filter(Boolean)
+          .filter((s: any) => !s.cancelled)
+          .map((s: any) => ({
+            streamId:      s.streamId,
+            chain:         "base",
+            employer:      s.employer,
+            ratePerSecond: s.ratePerSecond,
+            startTs:       s.startTs,
+            endTs:         s.endTs,
+            cliffTs:       0,
+            available:     s.available,
+            withdrawn:     s.withdrawn,
+            token:         "USDC",
+            status:        "active",
+          }));
+      } catch (err) {
+        logger.warn({ err }, "Base chain read failed — returning Stellar only");
+      }
+    }
+
+    const all        = [...stellarStreams, ...baseStreams];
+    const totalAvail = all.reduce((sum, s) => sum + (s.available ?? 0), 0);
 
     res.json({
-      streams:            allStreams,
-      totalAvailableUSDC: parseFloat(totalAvailable.toFixed(6)),
-      chains:             {
-        stellar: stellarFormatted.length,
-        base:    baseFormatted.length,
-      },
+      streams:            all,
+      totalAvailableUSDC: parseFloat(totalAvail.toFixed(6)),
+      chains:             { stellar: stellarStreams.length, base: baseStreams.length },
     });
   } catch (err) {
-    logger.error({ err }, "Failed to fetch worker streams");
+    logger.error({ err }, "GET /workers/me/streams failed");
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
 /**
  * GET /workers/me/balance
- * Real-time USDC balance for the authenticated worker (all chains).
- * Lightweight — suitable for polling every second from the mobile app.
+ * Lightweight real-time balance — mobile polls this on mount and every 30s.
+ * Reads directly from the Soroban contract so it always reflects on-chain state.
  */
 workersRouter.get("/me/balance", async (req, res) => {
   try {
     const privyId = req.privyUser!.sub;
-    const worker  = await db.query(
+
+    const workerResult = await query(
       `SELECT wallet_stellar FROM workers WHERE privy_id = $1 LIMIT 1`,
       [privyId]
     );
 
-    if (!worker.rows.length) {
-      res.json({ available: 0, streaming: 0, withdrawn: 0, currency: "USDC" });
+    if (!workerResult.rows.length || !workerResult.rows[0].wallet_stellar) {
+      const now = Math.floor(Date.now() / 1000);
+      res.json({ available: "0.000000", streamingPerSec: "0.00000000", withdrawn: "0.000000", currency: "USDC", timestamp: now });
       return;
     }
 
-    const { wallet_stellar } = worker.rows[0];
+    const { wallet_stellar } = workerResult.rows[0];
     const now = Math.floor(Date.now() / 1000);
 
-    const streams = await db.query(
-      `SELECT rate_per_second, start_ts, end_ts, total_withdrawn
-       FROM payroll_streams
-       WHERE worker_address = $1 AND status = 'active'`,
-      [wallet_stellar]
-    );
-
-    let streaming   = 0;
-    let available   = 0;
-    let withdrawn   = 0;
-
-    for (const s of streams.rows) {
-      const elapsed  = Math.max(0, now - s.start_ts);
-      const vested   = elapsed * s.rate_per_second;
-      const w        = s.total_withdrawn ?? 0;
-      available     += Math.max(0, vested - w);
-      streaming     += s.rate_per_second;   // current streaming rate
-      withdrawn     += w;
-    }
+    const { totalAvailable, streamingPerSec, withdrawn } =
+      await getWorkerStreamsStellar(wallet_stellar);
 
     res.json({
-      available:  parseFloat(available.toFixed(6)),
-      streaming:  parseFloat(streaming.toFixed(8)),  // per second
-      withdrawn:  parseFloat(withdrawn.toFixed(6)),
-      currency:   "USDC",
-      updatedAt:  now,
+      available:       totalAvailable.toFixed(6),
+      streamingPerSec: streamingPerSec.toFixed(8),
+      withdrawn:       withdrawn.toFixed(6),
+      currency:        "USDC",
+      timestamp:       now,
     });
   } catch (err) {
-    logger.error({ err }, "Failed to fetch worker balance");
+    logger.error({ err }, "GET /workers/me/balance failed");
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
 /**
  * POST /workers/me/register
- * Register or update worker's wallet addresses (called after Privy login).
+ * Called by mobile app after Privy login to link wallet addresses.
  */
 workersRouter.post("/me/register", async (req, res) => {
   try {
     const privyId = req.privyUser!.sub;
-    const { walletStellar, walletBase, email } = req.body;
+    const { walletStellar, walletBase, email } = req.body as {
+      walletStellar?: string;
+      walletBase?:    string;
+      email?:         string;
+    };
 
-    await db.query(
+    await query(
       `INSERT INTO workers (privy_id, email, wallet_stellar, wallet_base, created_at)
        VALUES ($1, $2, $3, $4, NOW())
        ON CONFLICT (privy_id) DO UPDATE
-         SET wallet_stellar = COALESCE($3, workers.wallet_stellar),
-             wallet_base    = COALESCE($4, workers.wallet_base),
-             email          = COALESCE($2, workers.email)`,
+         SET wallet_stellar = COALESCE(EXCLUDED.wallet_stellar, workers.wallet_stellar),
+             wallet_base    = COALESCE(EXCLUDED.wallet_base,    workers.wallet_base),
+             email          = COALESCE(EXCLUDED.email,          workers.email)`,
       [privyId, email ?? null, walletStellar ?? null, walletBase ?? null]
     );
 
-    res.json({ success: true });
+    res.json({ success: true, privyId });
   } catch (err) {
-    logger.error({ err }, "Failed to register worker");
+    logger.error({ err }, "POST /workers/me/register failed");
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * GET /workers/me/profile
+ * Returns the worker's registered wallet addresses and Privy DID.
+ */
+workersRouter.get("/me/profile", async (req, res) => {
+  try {
+    const privyId = req.privyUser!.sub;
+    const result  = await query(
+      `SELECT privy_id, email, wallet_stellar, wallet_base, created_at
+       FROM workers WHERE privy_id = $1 LIMIT 1`,
+      [privyId]
+    );
+
+    if (!result.rows.length) {
+      res.json({ registered: false });
+      return;
+    }
+
+    res.json({ registered: true, ...result.rows[0] });
+  } catch (err) {
+    logger.error({ err }, "GET /workers/me/profile failed");
     res.status(500).json({ error: "Internal server error" });
   }
 });

@@ -216,6 +216,7 @@ export const employers = pgTable(
     countryCode: text("country_code").notNull(),
     contactName: text("contact_name"),
     contactEmail: text("contact_email"),
+    stellarAddress: text("stellar_address").notNull().unique(),
     verificationStatus: text("verification_status")
       .notNull()
       .default("pending"),
@@ -230,6 +231,7 @@ export const employers = pgTable(
       .defaultNow(),
   },
   (table) => [
+    index("idx_employers_stellar_address").on(table.stellarAddress),
     index("idx_employers_status").on(table.verificationStatus),
     index("idx_employers_country_status").on(
       table.countryCode,
