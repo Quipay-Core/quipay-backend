@@ -2081,3 +2081,205 @@ export const getSchedulerOverrides = async (params: {
 
   return res.rows;
 };
+
+// ─── Invite queries ──────────────────────────────────────────────────────────
+
+export interface InviteRecord {
+  id: number;
+  token: string;
+  employer_address: string;
+  worker_address: string | null;
+  email: string | null;
+  stream_id: number | null;
+  status: "pending" | "accepted" | "declined" | "expired";
+  purpose: string | null;
+  amount: string | null;
+  token_asset: string;
+  invited_by: string;
+  accepted_at: Date | null;
+  declined_at: Date | null;
+  expires_at: Date;
+  created_at: Date;
+  updated_at: Date;
+}
+
+/**
+ * Create a new invite record.
+ */
+export const createInvite = async (params: {
+  token: string;
+  employerAddress: string;
+  email?: string;
+  workerAddress?: string;
+  streamId?: number;
+  purpose?: string;
+  amount?: string;
+  tokenAsset?: string;
+  invitedBy: string;
+  expiresAt: Date;
+}): Promise<InviteRecord> => {
+  const pool = getPool();
+  if (!pool) throw new DatabaseError("Database pool is not initialized");
+
+  const res = await query<InviteRecord>(
+    `INSERT INTO invites (
+      token, employer_address, worker_address, email, stream_id,
+      purpose, amount, token_asset, invited_by, expires_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    RETURNING *`,
+    [
+      params.token,
+      params.employerAddress,
+      params.workerAddress ?? null,
+      params.email ?? null,
+      params.streamId ?? null,
+      params.purpose ?? null,
+      params.amount ?? null,
+      params.tokenAsset ?? "USDC",
+      params.invitedBy,
+      params.expiresAt.toISOString(),
+    ],
+  );
+
+  return res.rows[0];
+};
+
+/**
+ * Get an invite by its unique token.
+ */
+export const getInviteByToken = async (
+  token: string,
+): Promise<InviteRecord | null> => {
+  const pool = getPool();
+  if (!pool) return null;
+
+  const res = await query<InviteRecord>(
+    "SELECT * FROM invites WHERE token = $1",
+    [token],
+  );
+
+  return res.rows[0] ?? null;
+};
+
+/**
+ * Get an invite by ID.
+ */
+export const getInviteById = async (
+  id: number,
+): Promise<InviteRecord | null> => {
+  const pool = getPool();
+  if (!pool) return null;
+
+  const res = await query<InviteRecord>(
+    "SELECT * FROM invites WHERE id = $1",
+    [id],
+  );
+
+  return res.rows[0] ?? null;
+};
+
+/**
+ * List invites for an employer, with optional status filter.
+ */
+export const getInvitesByEmployer = async (
+  employerAddress: string,
+  options?: { status?: string; limit?: number; offset?: number },
+): Promise<InviteRecord[]> => {
+  const pool = getPool();
+  if (!pool) return [];
+
+  const conditions = ["employer_address = $1"];
+  const values: unknown[] = [employerAddress];
+  let paramIdx = 2;
+
+  if (options?.status) {
+    conditions.push(`status = $${paramIdx++}`);
+    values.push(options.status);
+  }
+
+  const limit = options?.limit ?? 50;
+  const offset = options?.offset ?? 0;
+  values.push(limit, offset);
+
+  const res = await query<InviteRecord>(
+    `SELECT * FROM invites
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY created_at DESC
+    LIMIT $${paramIdx++} OFFSET $${paramIdx++}`,
+    values,
+  );
+
+  return res.rows;
+};
+
+/**
+ * Update an invite's status (accept, decline, expire).
+ */
+export const updateInviteStatus = async (
+  inviteId: number,
+  status: "accepted" | "declined" | "expired",
+  workerAddress?: string,
+): Promise<void> => {
+  const pool = getPool();
+  if (!pool) throw new DatabaseError("Database pool is not initialized");
+
+  const timestampCol =
+    status === "accepted"
+      ? "accepted_at"
+      : status === "declined"
+        ? "declined_at"
+        : null;
+
+  if (workerAddress) {
+    await query(
+      `UPDATE invites
+       SET status = $1, worker_address = $2, ${timestampCol ? `${timestampCol} = NOW(),` : ""}
+           updated_at = NOW()
+       WHERE id = $3`,
+      [status, workerAddress, inviteId],
+    );
+  } else {
+    await query(
+      `UPDATE invites
+       SET status = $1, ${timestampCol ? `${timestampCol} = NOW(),` : ""}
+           updated_at = NOW()
+       WHERE id = $2`,
+      [status, inviteId],
+    );
+  }
+};
+
+/**
+ * Count pending invites for an employer.
+ */
+export const countPendingInvites = async (
+  employerAddress: string,
+): Promise<number> => {
+  const pool = getPool();
+  if (!pool) return 0;
+
+  const res = await query<{ count: string }>(
+    `SELECT COUNT(*) as count FROM invites
+     WHERE employer_address = $1 AND status = 'pending' AND expires_at > NOW()`,
+    [employerAddress],
+  );
+
+  return parseInt(res.rows[0]?.count ?? "0", 10);
+};
+
+/**
+ * Mark expired invites as expired (batch job).
+ * Returns the number of invites expired.
+ */
+export const expireStaleInvites = async (): Promise<number> => {
+  const pool = getPool();
+  if (!pool) return 0;
+
+  const res = await query(
+    `UPDATE invites
+     SET status = 'expired', updated_at = NOW()
+     WHERE status = 'pending' AND expires_at <= NOW()`,
+  );
+
+  return res.rowCount ?? 0;
+};
