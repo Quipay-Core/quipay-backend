@@ -9,6 +9,10 @@ import {
   renderWorkerLowRunwayEmail,
   renderWorkerStreamEndingEmail,
 } from "../templates/alertEmails";
+import {
+  renderInviteEmail,
+  renderInviteReminderEmail,
+} from "../templates/inviteEmails";
 
 const notifierBreaker = createCircuitBreaker(axios.post, {
   name: "notifier_alerts",
@@ -419,4 +423,125 @@ export const sendWorkerLowRunwayNotification = async (params: {
     runwayDays: params.runwayDays,
     thresholdDays: params.thresholdDays,
   });
+};
+
+// ─── Invite emails ───────────────────────────────────────────────────────────
+
+/**
+ * Send an invite email to a worker.
+ * Requires SENDGRID_API_KEY and SENDGRID_FROM_EMAIL to be set.
+ */
+export const sendInviteEmail = async (params: {
+  to: string;
+  employerName: string;
+  purpose?: string;
+  amount?: string;
+  tokenAsset: string;
+  inviteLink: string;
+  inviteCode: string;
+}): Promise<void> => {
+  const sendgrid = getSendgridConfig();
+  if (!sendgrid) {
+    await serviceLogger.warn(
+      "Notifier",
+      "SendGrid not configured; skipping invite email",
+      {
+        event_type: "invite_email_skipped",
+        reason: "missing_sendgrid_config",
+      },
+    );
+    return;
+  }
+
+  ensureSendgridInitialized(sendgrid.apiKey);
+
+  const rendered = renderInviteEmail({
+    employerName: params.employerName,
+    purpose: params.purpose,
+    amount: params.amount,
+    tokenAsset: params.tokenAsset,
+    inviteLink: params.inviteLink,
+    inviteCode: params.inviteCode,
+  });
+
+  try {
+    await sgMail.send({
+      to: params.to,
+      from: sendgrid.fromEmail,
+      subject: rendered.subject,
+      html: rendered.html,
+    });
+
+    await serviceLogger.info("Notifier", "Invite email delivered", {
+      event_type: "invite_email_delivered",
+      to: params.to,
+      provider: "sendgrid",
+    });
+  } catch (err: unknown) {
+    await serviceLogger.error("Notifier", "Invite email delivery failed", {
+      event_type: "invite_email_failed",
+      to: params.to,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+};
+
+/**
+ * Send an invite reminder email to a worker.
+ */
+export const sendInviteReminderEmail = async (params: {
+  to: string;
+  employerName: string;
+  purpose?: string;
+  inviteLink: string;
+  inviteCode: string;
+}): Promise<void> => {
+  const sendgrid = getSendgridConfig();
+  if (!sendgrid) {
+    await serviceLogger.warn(
+      "Notifier",
+      "SendGrid not configured; skipping invite reminder email",
+      {
+        event_type: "invite_reminder_skipped",
+        reason: "missing_sendgrid_config",
+      },
+    );
+    return;
+  }
+
+  ensureSendgridInitialized(sendgrid.apiKey);
+
+  const rendered = renderInviteReminderEmail({
+    employerName: params.employerName,
+    purpose: params.purpose,
+    inviteLink: params.inviteLink,
+    inviteCode: params.inviteCode,
+  });
+
+  try {
+    await sgMail.send({
+      to: params.to,
+      from: sendgrid.fromEmail,
+      subject: rendered.subject,
+      html: rendered.html,
+    });
+
+    await serviceLogger.info("Notifier", "Invite reminder email delivered", {
+      event_type: "invite_reminder_delivered",
+      to: params.to,
+      provider: "sendgrid",
+    });
+  } catch (err: unknown) {
+    await serviceLogger.error(
+      "Notifier",
+      "Invite reminder email delivery failed",
+      {
+        event_type: "invite_reminder_failed",
+        to: params.to,
+        error: err instanceof Error ? err.message : String(err),
+      },
+    );
+    throw err;
+  }
 };
