@@ -476,3 +476,56 @@ export const payrollReportSchedules = pgTable(
     index("idx_report_schedules_next_send").on(table.nextSendAt),
   ],
 );
+
+// ── Invite system for employer→worker connection ─────────────────────────────
+export const invites = pgTable(
+  "invites",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    /** URL-safe random token (nanoid, ~10 chars) used in invite links and codes */
+    token: text("token").notNull().unique(),
+    /** Stellar G-address of the employer who created the invite */
+    employerAddress: text("employer_address").notNull(),
+    /** Stellar G-address of the worker (set on accept, null for email-only invites) */
+    workerAddress: text("worker_address"),
+    /** Worker email for email-based invites */
+    email: text("email"),
+    /** Optional pre-associated stream ID */
+    streamId: bigint("stream_id", { mode: "number" }),
+    /** Invite lifecycle: pending | accepted | declined | expired */
+    status: text("status").notNull().default("pending"),
+    /** Human-readable purpose, e.g. "Monthly salary - Design work" */
+    purpose: text("purpose"),
+    /** Pre-set payment amount in stroops (optional) */
+    amount: numeric("amount"),
+    /** Pre-set payment asset (default USDC) */
+    tokenAsset: text("token_asset").default("USDC"),
+    /** Who created the invite (employer user ID or stellar address) */
+    invitedBy: text("invited_by").notNull(),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    declinedAt: timestamp("declined_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_invites_token").on(table.token),
+    index("idx_invites_employer").on(table.employerAddress),
+    index("idx_invites_worker").on(table.workerAddress),
+    index("idx_invites_status").on(table.status),
+    index("idx_invites_email").on(table.email),
+    index("idx_invites_expires").on(table.expiresAt),
+    index("idx_invites_employer_status").on(
+      table.employerAddress,
+      table.status,
+    ),
+    check(
+      "invites_status_check",
+      sql`${table.status} IN ('pending', 'accepted', 'declined', 'expired')`,
+    ),
+  ],
+);
