@@ -26,6 +26,8 @@ import { payslipsRouter } from "./routes/payslips";
 import { brandingRouter } from "./routes/branding";
 import { workersRouter } from "./routes/workers";
 import { invitesRouter } from "./routes/invites";
+import { orgsRouter } from "./routes/orgs";
+import { payrollsRouter } from "./routes/payrolls";
 import { keyRotationScheduler } from "./services/keyRotationScheduler";
 import {
   initWebSocketServer,
@@ -192,6 +194,10 @@ app.use("/api", payslipsRouter); // For /api/verify-signature
 app.use("/api/employers", brandingRouter);
 app.use("/invites", invitesRouter);
 app.use("/api/invites", invitesRouter);
+app.use("/orgs", orgsRouter);
+app.use("/api/orgs", orgsRouter);
+app.use("/payrolls", payrollsRouter);
+app.use("/api/payrolls", payrollsRouter);
 
 // Start time for uptime calculation
 const startTime = Date.now();
