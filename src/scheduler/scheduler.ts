@@ -621,6 +621,95 @@ const runStreamEndingChecker = async (): Promise<void> => {
 };
 
 /**
+ * Auto-renew checker: finds streams nearing completion that have auto-renew
+ * enabled in payroll_schedules, and creates replacement streams.
+ */
+const notifiedAutoRenewKeys = new Set<string>();
+
+const runAutoRenewChecker = async (): Promise<void> => {
+  if (!getPool()) return;
+
+  const { query } = await import("../db/pool.js");
+
+  // Find schedules with auto_renew enabled
+  const schedulesRes = await query<{
+    id: number;
+    employer: string;
+    worker: string;
+    token: string;
+    rate: string;
+    duration_days: number;
+    renewal_duration_days: number;
+  }>(
+    `SELECT id, employer, worker, token, rate, duration_days, renewal_duration_days
+     FROM payroll_schedules
+     WHERE auto_renew = true AND enabled = true`,
+  );
+
+  if (schedulesRes.rows.length === 0) return;
+
+  const now = Math.floor(Date.now() / 1000);
+
+  for (const schedule of schedulesRes.rows) {
+    const renewalWindowDays = schedule.renewal_duration_days ?? 7;
+    const renewalWindowSeconds = renewalWindowDays * 86400;
+
+    // Find active streams for this employer-worker pair ending within the window
+    const streamsRes = await query<{
+      stream_id: number;
+      end_ts: number;
+    }>(
+      `SELECT stream_id, end_ts FROM payroll_streams
+       WHERE employer_address = $1
+         AND worker_address = $2
+         AND status = 'active'
+         AND deleted_at IS NULL
+         AND end_ts <= $3
+         AND end_ts > $4`,
+      [
+        schedule.employer,
+        schedule.worker,
+        now + renewalWindowSeconds,
+        now,
+      ],
+    );
+
+    for (const stream of streamsRes.rows) {
+      const renewKey = `renew:${stream.stream_id}`;
+      if (notifiedAutoRenewKeys.has(renewKey)) continue;
+
+      // Mark the old stream for completion (it will end naturally)
+      // Create a new stream starting when the old one ends
+      const newStartTs = stream.end_ts;
+      const newEndTs = newStartTs + schedule.duration_days * 86400;
+
+      try {
+        await triggerStreamCreation({
+          employer: schedule.employer,
+          worker: schedule.worker,
+          token: schedule.token,
+          rate: schedule.rate,
+          startTs: newStartTs,
+          endTs: newEndTs,
+        });
+
+        log(
+          `Auto-renewed stream for ${schedule.employer} -> ${schedule.worker}: ` +
+            `old=${stream.stream_id}, new starts at ${new Date(newStartTs * 1000).toISOString()}`,
+        );
+
+        notifiedAutoRenewKeys.add(renewKey);
+      } catch (err) {
+        logError(
+          `Auto-renew failed for schedule ${schedule.id}, stream ${stream.stream_id}`,
+          err,
+        );
+      }
+    }
+  }
+};
+
+/**
  * Execute pending scheduler overrides from the admin queue.
  * Dequeues up to 10 pending overrides and processes them.
  */
@@ -728,6 +817,15 @@ const startWorkerNotificationSchedulers = (): void => {
       await runStreamEndingChecker();
     } catch (error) {
       logError("Stream ending checker failed", error);
+    }
+  });
+
+  // Auto-renew: check daily at 2am
+  cron.schedule("0 2 * * *", async () => {
+    try {
+      await runAutoRenewChecker();
+    } catch (error) {
+      logError("Auto-renew checker failed", error);
     }
   });
 };

@@ -151,6 +151,8 @@ export const payrollSchedules = pgTable(
     rate: numeric("rate").notNull(),
     cronExpression: text("cron_expression").notNull(),
     durationDays: integer("duration_days").notNull().default(30),
+    autoRenew: boolean("auto_renew").notNull().default(false),
+    renewalDurationDays: integer("renewal_duration_days").default(30),
     enabled: boolean("enabled").notNull().default(true),
     lastRunAt: timestamp("last_run_at", { withTimezone: true }),
     nextRunAt: timestamp("next_run_at", { withTimezone: true }),
