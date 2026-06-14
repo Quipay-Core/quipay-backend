@@ -108,14 +108,16 @@ invitesRouter.get(
 
 /**
  * POST /invites/:token/accept
- * Public — worker accepts the invite with their Stellar wallet address.
+ * Public — accepts the invite. Behavior depends on invite_type:
+ * - worker: creates worker_registration + employee_profile
+ * - member: creates org_members entry
  */
 invitesRouter.post(
   "/:token/accept",
   validateRequest({ params: inviteTokenParamSchema, body: acceptInviteSchema }),
   async (req: Request, res: Response): Promise<any> => {
     const token = String(req.params.token);
-    const { workerAddress, fullName, jobTitle } = req.body;
+    const { workerAddress, userId, fullName, jobTitle } = req.body;
 
     const invite = await getInviteByToken(token);
     if (!invite) {
@@ -134,10 +136,52 @@ invitesRouter.post(
       return res.status(410).json({ error: "Invite has expired" });
     }
 
+    const inviteType = (invite as any).invite_type ?? "worker";
+
+    // ── Member invite ─────────────────────────────────────────────────────
+    if (inviteType === "member") {
+      if (!userId) {
+        return res.status(400).json({ error: "userId is required for member invites" });
+      }
+
+      // Mark invite as accepted
+      await updateInviteStatus(invite.id, "accepted");
+
+      // Add to org_members
+      try {
+        await query(
+          `INSERT INTO org_members (org_id, user_id, role, invited_by)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (org_id, user_id) DO UPDATE SET role = EXCLUDED.role, updated_at = NOW()`,
+          [invite.employer_address, userId, (invite as any).role ?? "viewer", invite.invited_by],
+        );
+      } catch (err) {
+        logger.warn({ err }, "Failed to insert org_member");
+      }
+
+      logger.info(
+        { inviteId: invite.id, orgId: invite.employer_address, userId },
+        "Member invite accepted",
+      );
+
+      return res.json({
+        success: true,
+        inviteType: "member",
+        orgId: invite.employer_address,
+        userId,
+        role: (invite as any).role ?? "viewer",
+      });
+    }
+
+    // ── Worker invite (default) ───────────────────────────────────────────
+    if (!workerAddress) {
+      return res.status(400).json({ error: "workerAddress is required for worker invites" });
+    }
+
     // Mark invite as accepted
     await updateInviteStatus(invite.id, "accepted", workerAddress);
 
-    // Create worker registration (same logic as POST /api/employers/worker-registrations)
+    // Create worker registration
     try {
       await query(
         `INSERT INTO worker_registrations (worker_address, employer_address, registered_at)
@@ -146,7 +190,6 @@ invitesRouter.post(
         [workerAddress, invite.employer_address],
       );
     } catch (err) {
-      // Table might not exist yet — log but don't fail
       logger.warn({ err }, "Failed to insert worker_registration");
     }
 
@@ -167,11 +210,12 @@ invitesRouter.post(
 
     logger.info(
       { inviteId: invite.id, employerAddress: invite.employer_address, workerAddress },
-      "Invite accepted",
+      "Worker invite accepted",
     );
 
     return res.json({
       success: true,
+      inviteType: "worker",
       employerAddress: invite.employer_address,
       workerAddress,
       purpose: invite.purpose,
@@ -224,8 +268,16 @@ invitesRouter.post(
     }
 
     const employerAddress = req.user.stellarAddress ?? req.user.id;
-    const { email, workerAddress, purpose, amount, tokenAsset, expiresInDays } =
-      req.body;
+    const {
+      email,
+      workerAddress,
+      purpose,
+      amount,
+      tokenAsset,
+      expiresInDays,
+      inviteType,
+      role,
+    } = req.body;
 
     // Limit: max 50 pending invites per employer
     const pendingCount = await countPendingInvites(employerAddress);
@@ -249,6 +301,8 @@ invitesRouter.post(
       tokenAsset,
       invitedBy: req.user.id,
       expiresAt,
+      inviteType: inviteType ?? "worker",
+      role,
     });
 
     const link = buildInviteLink(token);
