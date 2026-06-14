@@ -2117,6 +2117,8 @@ export const createInvite = async (params: {
   tokenAsset?: string;
   invitedBy: string;
   expiresAt: Date;
+  inviteType?: string;
+  role?: string;
 }): Promise<InviteRecord> => {
   const pool = getPool();
   if (!pool) throw new DatabaseError("Database pool is not initialized");
@@ -2124,8 +2126,9 @@ export const createInvite = async (params: {
   const res = await query<InviteRecord>(
     `INSERT INTO invites (
       token, employer_address, worker_address, email, stream_id,
-      purpose, amount, token_asset, invited_by, expires_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      purpose, amount, token_asset, invited_by, expires_at,
+      invite_type, role
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
     RETURNING *`,
     [
       params.token,
@@ -2138,6 +2141,8 @@ export const createInvite = async (params: {
       params.tokenAsset ?? "USDC",
       params.invitedBy,
       params.expiresAt.toISOString(),
+      params.inviteType ?? "worker",
+      params.role ?? null,
     ],
   );
 
@@ -2282,4 +2287,411 @@ export const expireStaleInvites = async (): Promise<number> => {
   );
 
   return res.rowCount ?? 0;
+};
+
+// ─── Org member queries ──────────────────────────────────────────────────────
+
+export interface OrgMemberRecord {
+  id: number;
+  org_id: string;
+  user_id: string;
+  role: "owner" | "admin" | "viewer";
+  invited_by: string | null;
+  joined_at: Date;
+  created_at: Date;
+}
+
+/**
+ * Get all orgs a user belongs to.
+ */
+export const getUserOrgs = async (
+  userId: string,
+): Promise<OrgMemberRecord[]> => {
+  const pool = getPool();
+  if (!pool) return [];
+
+  const res = await query<OrgMemberRecord>(
+    `SELECT * FROM org_members WHERE user_id = $1 ORDER BY joined_at DESC`,
+    [userId],
+  );
+
+  return res.rows;
+};
+
+/**
+ * Get all members of an org.
+ */
+export const getOrgMembers = async (
+  orgId: string,
+): Promise<OrgMemberRecord[]> => {
+  const pool = getPool();
+  if (!pool) return [];
+
+  const res = await query<OrgMemberRecord>(
+    `SELECT * FROM org_members WHERE org_id = $1 ORDER BY
+     CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
+     joined_at ASC`,
+    [orgId],
+  );
+
+  return res.rows;
+};
+
+/**
+ * Get a user's role in a specific org.
+ * Returns null if not a member.
+ */
+export const getUserOrgRole = async (
+  orgId: string,
+  userId: string,
+): Promise<string | null> => {
+  const pool = getPool();
+  if (!pool) return null;
+
+  const res = await query<{ role: string }>(
+    `SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2`,
+    [orgId, userId],
+  );
+
+  return res.rows[0]?.role ?? null;
+};
+
+/**
+ * Add a member to an org.
+ */
+export const addOrgMember = async (params: {
+  orgId: string;
+  userId: string;
+  role: string;
+  invitedBy?: string;
+}): Promise<OrgMemberRecord> => {
+  const pool = getPool();
+  if (!pool) throw new DatabaseError("Database pool is not initialized");
+
+  const res = await query<OrgMemberRecord>(
+    `INSERT INTO org_members (org_id, user_id, role, invited_by)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (org_id, user_id) DO UPDATE SET role = EXCLUDED.role, updated_at = NOW()
+     RETURNING *`,
+    [params.orgId, params.userId, params.role, params.invitedBy ?? null],
+  );
+
+  return res.rows[0];
+};
+
+/**
+ * Update a member's role.
+ */
+export const updateOrgMemberRole = async (
+  orgId: string,
+  userId: string,
+  role: string,
+): Promise<void> => {
+  const pool = getPool();
+  if (!pool) throw new DatabaseError("Database pool is not initialized");
+
+  await query(
+    `UPDATE org_members SET role = $1, updated_at = NOW()
+     WHERE org_id = $2 AND user_id = $3`,
+    [role, orgId, userId],
+  );
+};
+
+/**
+ * Remove a member from an org.
+ */
+export const removeOrgMember = async (
+  orgId: string,
+  userId: string,
+): Promise<void> => {
+  const pool = getPool();
+  if (!pool) throw new DatabaseError("Database pool is not initialized");
+
+  await query(
+    `DELETE FROM org_members WHERE org_id = $1 AND user_id = $2`,
+    [orgId, userId],
+  );
+};
+
+/**
+ * Check if user is org owner or admin.
+ */
+export const isOrgAdmin = async (
+  orgId: string,
+  userId: string,
+): Promise<boolean> => {
+  const pool = getPool();
+  if (!pool) return false;
+
+  const res = await query<{ exists: boolean }>(
+    `SELECT EXISTS(
+       SELECT 1 FROM org_members
+       WHERE org_id = $1 AND user_id = $2 AND role IN ('owner', 'admin')
+     ) as exists`,
+    [orgId, userId],
+  );
+
+  return res.rows[0]?.exists ?? false;
+};
+
+/**
+ * Check if user is org owner.
+ */
+export const isOrgOwner = async (
+  orgId: string,
+  userId: string,
+): Promise<boolean> => {
+  const pool = getPool();
+  if (!pool) return false;
+
+  const res = await query<{ exists: boolean }>(
+    `SELECT EXISTS(
+       SELECT 1 FROM org_members
+       WHERE org_id = $1 AND user_id = $2 AND role = 'owner'
+     ) as exists`,
+    [orgId, userId],
+  );
+
+  return res.rows[0]?.exists ?? false;
+};
+
+// ─── Payroll queries ─────────────────────────────────────────────────────────
+
+export interface PayrollRecord {
+  id: number;
+  org_id: string;
+  name: string;
+  created_by: string;
+  total_amount: string;
+  stream_count: number;
+  status: "draft" | "processing" | "active" | "completed" | "failed";
+  created_at: Date;
+  completed_at: Date | null;
+  updated_at: Date;
+}
+
+export interface PayrollEntryRecord {
+  id: number;
+  payroll_id: number;
+  stream_id: number | null;
+  worker_address: string;
+  amount: string;
+  status: "pending" | "active" | "failed";
+  error_message: string | null;
+  created_at: Date;
+}
+
+export interface PayrollTemplateRecord {
+  id: number;
+  org_id: string;
+  name: string;
+  created_by: string;
+  template_json: Array<{ workerAddress: string; amount: string; purpose?: string }>;
+  created_at: Date;
+  updated_at: Date;
+}
+
+/**
+ * Create a new payroll group.
+ */
+export const createPayroll = async (params: {
+  orgId: string;
+  name: string;
+  createdBy: string;
+  entries: Array<{ workerAddress: string; amount: string }>;
+}): Promise<PayrollRecord> => {
+  const pool = getPool();
+  if (!pool) throw new DatabaseError("Database pool is not initialized");
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const totalAmount = params.entries.reduce(
+      (sum, e) => sum + BigInt(e.amount),
+      0n,
+    );
+
+    const payrollRes = await client.query(
+      `INSERT INTO payrolls (org_id, name, created_by, total_amount, stream_count, status)
+       VALUES ($1, $2, $3, $4, $5, 'active')
+       RETURNING *`,
+      [params.orgId, params.name, params.createdBy, totalAmount.toString(), params.entries.length],
+    );
+    const payroll = payrollRes.rows[0];
+
+    for (const entry of params.entries) {
+      await client.query(
+        `INSERT INTO payroll_entries (payroll_id, worker_address, amount)
+         VALUES ($1, $2, $3)`,
+        [payroll.id, entry.workerAddress, entry.amount],
+      );
+    }
+
+    await client.query("COMMIT");
+    return payroll;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Get payrolls for an org.
+ */
+export const getPayrollsByOrg = async (
+  orgId: string,
+  limit = 20,
+  offset = 0,
+): Promise<PayrollRecord[]> => {
+  const pool = getPool();
+  if (!pool) return [];
+
+  const res = await query<PayrollRecord>(
+    `SELECT * FROM payrolls
+     WHERE org_id = $1
+     ORDER BY created_at DESC
+     LIMIT $2 OFFSET $3`,
+    [orgId, limit, offset],
+  );
+
+  return res.rows;
+};
+
+/**
+ * Get a single payroll by ID.
+ */
+export const getPayrollById = async (
+  payrollId: number,
+): Promise<PayrollRecord | null> => {
+  const pool = getPool();
+  if (!pool) return null;
+
+  const res = await query<PayrollRecord>(
+    `SELECT * FROM payrolls WHERE id = $1`,
+    [payrollId],
+  );
+
+  return res.rows[0] ?? null;
+};
+
+/**
+ * Get entries for a payroll.
+ */
+export const getPayrollEntries = async (
+  payrollId: number,
+): Promise<PayrollEntryRecord[]> => {
+  const pool = getPool();
+  if (!pool) return [];
+
+  const res = await query<PayrollEntryRecord>(
+    `SELECT * FROM payroll_entries WHERE payroll_id = $1 ORDER BY id`,
+    [payrollId],
+  );
+
+  return res.rows;
+};
+
+/**
+ * Update a payroll entry with the created stream ID.
+ */
+export const updatePayrollEntryStream = async (
+  entryId: number,
+  streamId: number,
+): Promise<void> => {
+  const pool = getPool();
+  if (!pool) throw new DatabaseError("Database pool is not initialized");
+
+  await query(
+    `UPDATE payroll_entries SET stream_id = $1, status = 'active' WHERE id = $2`,
+    [streamId, entryId],
+  );
+};
+
+/**
+ * Mark a payroll entry as failed.
+ */
+export const updatePayrollEntryFailed = async (
+  entryId: number,
+  errorMessage: string,
+): Promise<void> => {
+  const pool = getPool();
+  if (!pool) throw new DatabaseError("Database pool is not initialized");
+
+  await query(
+    `UPDATE payroll_entries SET status = 'failed', error_message = $1 WHERE id = $2`,
+    [errorMessage, entryId],
+  );
+};
+
+/**
+ * Mark a payroll as completed.
+ */
+export const completePayroll = async (payrollId: number): Promise<void> => {
+  const pool = getPool();
+  if (!pool) throw new DatabaseError("Database pool is not initialized");
+
+  await query(
+    `UPDATE payrolls SET status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+    [payrollId],
+  );
+};
+
+// ─── Payroll template queries ────────────────────────────────────────────────
+
+/**
+ * Create a payroll template.
+ */
+export const createPayrollTemplate = async (params: {
+  orgId: string;
+  name: string;
+  createdBy: string;
+  templateJson: Array<{ workerAddress: string; amount: string; purpose?: string }>;
+}): Promise<PayrollTemplateRecord> => {
+  const pool = getPool();
+  if (!pool) throw new DatabaseError("Database pool is not initialized");
+
+  const res = await query<PayrollTemplateRecord>(
+    `INSERT INTO payroll_templates (org_id, name, created_by, template_json)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [params.orgId, params.name, params.createdBy, JSON.stringify(params.templateJson)],
+  );
+
+  return res.rows[0];
+};
+
+/**
+ * Get templates for an org.
+ */
+export const getPayrollTemplatesByOrg = async (
+  orgId: string,
+): Promise<PayrollTemplateRecord[]> => {
+  const pool = getPool();
+  if (!pool) return [];
+
+  const res = await query<PayrollTemplateRecord>(
+    `SELECT * FROM payroll_templates WHERE org_id = $1 ORDER BY created_at DESC`,
+    [orgId],
+  );
+
+  return res.rows;
+};
+
+/**
+ * Delete a payroll template.
+ */
+export const deletePayrollTemplate = async (
+  templateId: number,
+  orgId: string,
+): Promise<void> => {
+  const pool = getPool();
+  if (!pool) throw new DatabaseError("Database pool is not initialized");
+
+  await query(
+    `DELETE FROM payroll_templates WHERE id = $1 AND org_id = $2`,
+    [templateId, orgId],
+  );
 };

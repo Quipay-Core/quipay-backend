@@ -502,6 +502,10 @@ export const invites = pgTable(
     tokenAsset: text("token_asset").default("USDC"),
     /** Who created the invite (employer user ID or stellar address) */
     invitedBy: text("invited_by").notNull(),
+    /** Invite type: worker (default) or org member */
+    inviteType: text("invite_type").notNull().default("worker"),
+    /** Role for member invites: owner | admin | viewer */
+    role: text("role"),
     acceptedAt: timestamp("accepted_at", { withTimezone: true }),
     declinedAt: timestamp("declined_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
@@ -527,5 +531,130 @@ export const invites = pgTable(
       "invites_status_check",
       sql`${table.status} IN ('pending', 'accepted', 'declined', 'expired')`,
     ),
+  ],
+);
+
+// ── Organization members (multi-tenancy) ─────────────────────────────────────
+export const orgMembers = pgTable(
+  "org_members",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    /** FK → employers.employer_id — the organization */
+    orgId: text("org_id").notNull(),
+    /** Authenticated user ID who is a member */
+    userId: text("user_id").notNull(),
+    /** Role within the org: owner | admin | viewer */
+    role: text("role").notNull().default("viewer"),
+    /** Who invited this member */
+    invitedBy: text("invited_by"),
+    joinedAt: timestamp("joined_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("ux_org_members_org_user").on(table.orgId, table.userId),
+    index("idx_org_members_user").on(table.userId),
+    index("idx_org_members_org").on(table.orgId),
+    index("idx_org_members_role").on(table.role),
+    check(
+      "org_members_role_check",
+      sql`${table.role} IN ('owner', 'admin', 'viewer')`,
+    ),
+  ],
+);
+
+// ── Payroll groups (batch stream creation) ───────────────────────────────────
+export const payrolls = pgTable(
+  "payrolls",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    /** FK → employers.employer_id — the organization that owns this payroll */
+    orgId: text("org_id").notNull(),
+    /** Human-readable name, e.g. "January 2026 Salary" */
+    name: text("name").notNull(),
+    /** Who created this payroll */
+    createdBy: text("created_by").notNull(),
+    /** Total amount across all streams (stroops) */
+    totalAmount: numeric("total_amount").notNull().default("0"),
+    /** Number of streams in this payroll */
+    streamCount: integer("stream_count").notNull().default(0),
+    /** Payroll lifecycle: draft | processing | active | completed | failed */
+    status: text("status").notNull().default("draft"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_payrolls_org").on(table.orgId),
+    index("idx_payrolls_status").on(table.status),
+    index("idx_payrolls_created").on(table.createdAt.desc()),
+    check(
+      "payrolls_status_check",
+      sql`${table.status} IN ('draft', 'processing', 'active', 'completed', 'failed')`,
+    ),
+  ],
+);
+
+// ── Payroll entries (items within a payroll group) ───────────────────────────
+export const payrollEntries = pgTable(
+  "payroll_entries",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    payrollId: bigint("payroll_id", { mode: "number" })
+      .notNull()
+      .references(() => payrolls.id),
+    streamId: bigint("stream_id", { mode: "number" }),
+    /** Worker stellar address */
+    workerAddress: text("worker_address").notNull(),
+    /** Amount for this specific stream (stroops) */
+    amount: numeric("amount").notNull(),
+    /** Stream status within this payroll: pending | active | failed */
+    status: text("status").notNull().default("pending"),
+    /** Error message if stream creation failed */
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_payroll_streams_payroll").on(table.payrollId),
+    index("idx_payroll_streams_stream").on(table.streamId),
+    index("idx_payroll_streams_worker").on(table.workerAddress),
+    index("idx_payroll_streams_status").on(table.status),
+  ],
+);
+
+// ── Payroll templates (saved configurations) ─────────────────────────────────
+export const payrollTemplates = pgTable(
+  "payroll_templates",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    /** FK → employers.employer_id */
+    orgId: text("org_id").notNull(),
+    /** Template name */
+    name: text("name").notNull(),
+    /** Who created this template */
+    createdBy: text("created_by").notNull(),
+    /** Template data: array of { workerAddress, amount, purpose } */
+    templateJson: jsonb("template_json").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_payroll_templates_org").on(table.orgId),
   ],
 );

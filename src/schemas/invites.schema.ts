@@ -20,6 +20,10 @@ export const createInviteSchema = z
       .optional(),
     tokenAsset: z.string().trim().min(2).max(20).default("USDC"),
     expiresInDays: z.number().int().min(1).max(90).default(7),
+    /** Invite type: worker (default) or member */
+    inviteType: z.enum(["worker", "member"]).default("worker"),
+    /** Role for member invites: admin | viewer (owner is set directly, not via invite) */
+    role: z.enum(["admin", "viewer"]).optional(),
   })
   .refine((data) => data.email || data.workerAddress, {
     message: "Either email or workerAddress must be provided",
@@ -27,12 +31,16 @@ export const createInviteSchema = z
 
 /**
  * Schema for accepting an invite.
+ * workerAddress: for worker invites (Stellar G-address)
+ * userId: for member invites (auth user ID)
  */
 export const acceptInviteSchema = z.object({
   workerAddress: z
     .string()
     .trim()
-    .regex(/^G[A-Z2-7]{55}$/, "Must be a valid Stellar public key (G...)"),
+    .regex(/^G[A-Z2-7]{55}$/, "Must be a valid Stellar public key (G...)")
+    .optional(),
+  userId: z.string().trim().min(1).optional(),
   fullName: z.string().trim().min(1).max(120).optional(),
   jobTitle: z.string().trim().max(120).optional(),
 });

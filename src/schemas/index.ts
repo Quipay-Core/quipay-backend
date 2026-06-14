@@ -42,3 +42,14 @@ export {
   type InviteIdParam,
   type ListInvitesQuery,
 } from "./invites.schema";
+
+export {
+  addOrgMemberSchema,
+  updateOrgMemberSchema,
+  orgIdParamSchema,
+  orgMemberParamSchema,
+  type AddOrgMemberInput,
+  type UpdateOrgMemberInput,
+  type OrgIdParam,
+  type OrgMemberParam,
+} from "./orgs.schema";
