@@ -1326,6 +1326,92 @@ export const getStreamAuditLog = async (
   return res.rows;
 };
 
+// ─── Stream modification queries ─────────────────────────────────────────────
+
+/**
+ * Update stream after an extend operation (top up / extend duration / rate change).
+ */
+export const updateStreamAfterExtend = async (params: {
+  streamId: number;
+  newTotalAmount: string;
+  newEndTime: number;
+  newRate: string;
+  changedBy: string;
+}): Promise<void> => {
+  if (!getPool()) return;
+
+  await withDbTransaction(async (client) => {
+    await client.query(
+      `UPDATE payroll_streams
+       SET total_amount = $1, end_ts = $2, updated_at = NOW()
+       WHERE stream_id = $3`,
+      [params.newTotalAmount, params.newEndTime, params.streamId],
+    );
+
+    await client.query(
+      `INSERT INTO stream_audit_log (stream_id, changed_by, action, metadata)
+       VALUES ($1, $2, 'extended', $3)`,
+      [
+        params.streamId,
+        params.changedBy,
+        JSON.stringify({
+          new_total_amount: params.newTotalAmount,
+          new_end_ts: params.newEndTime,
+          new_rate: params.newRate,
+        }),
+      ],
+    );
+  });
+};
+
+/**
+ * Update stream status (pause/resume).
+ */
+export const updateStreamStatus = async (params: {
+  streamId: number;
+  status: "active" | "paused" | "completed" | "cancelled";
+  changedBy: string;
+}): Promise<boolean> => {
+  if (!getPool()) return false;
+
+  const res = await query(
+    `UPDATE payroll_streams SET status = $1, updated_at = NOW()
+     WHERE stream_id = $2 AND deleted_at IS NULL`,
+    [params.status, params.streamId],
+  );
+
+  if ((res.rowCount ?? 0) === 0) return false;
+
+  await query(
+    `INSERT INTO stream_audit_log (stream_id, changed_by, action, new_status)
+     VALUES ($1, $2, $3, $4)`,
+    [params.streamId, params.changedBy, `status_${params.status}`, params.status],
+  );
+
+  return true;
+};
+
+/**
+ * Get streams nearing completion (for auto-renew).
+ * Returns active streams where end_ts is within `daysBeforeExpiry` days of now.
+ */
+export const getStreamsNearingCompletion = async (
+  daysBeforeExpiry: number,
+): Promise<StreamRecord[]> => {
+  if (!getPool()) return [];
+
+  const res = await query<StreamRecord>(
+    `SELECT * FROM payroll_streams
+     WHERE status = 'active'
+       AND deleted_at IS NULL
+       AND end_ts <= EXTRACT(EPOCH FROM NOW()) + ($1 * 86400)
+       AND end_ts > EXTRACT(EPOCH FROM NOW())`,
+    [daysBeforeExpiry],
+  );
+
+  return res.rows;
+};
+
 // ─── Payroll proof queries ────────────────────────────────────────────────────
 
 export const insertPayrollProof = async (params: {

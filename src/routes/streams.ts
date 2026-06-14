@@ -23,7 +23,10 @@ import {
   softDeleteStream,
   getStreamAuditLog,
   getStreamById,
+  updateStreamAfterExtend,
+  updateStreamStatus,
 } from "../db/queries";
+import { logger } from "../logger";
 
 export const streamsRouter = Router();
 
@@ -213,5 +216,223 @@ streamsRouter.get(
 
     const auditLog = await getStreamAuditLog(streamId);
     return res.status(200).json({ streamId, auditLog });
+  },
+);
+
+// ── POST /streams/:id/extend  (top up / extend duration / modify rate) ───────
+
+const extendStreamSchema = z
+  .object({
+    additionalAmount: z
+      .string()
+      .regex(/^\d+$/, "Must be a numeric string (stroops)")
+      .optional(),
+    newEndTime: z.number().int().positive().optional(),
+    newRate: z
+      .string()
+      .regex(/^\d+$/, "Must be a numeric string (stroops/sec)")
+      .optional(),
+  })
+  .refine(
+    (data) => data.additionalAmount || data.newEndTime || data.newRate,
+    "At least one of additionalAmount, newEndTime, or newRate must be provided",
+  );
+
+/**
+ * @swagger
+ * /streams/{id}/extend:
+ *   post:
+ *     summary: Extend, top up, or modify rate of an active stream
+ *     description: >
+ *       Wraps the on-chain `extend_stream` function with user-friendly parameters.
+ *       - Top up: pass additionalAmount only (rate increases, end stays same)
+ *       - Extend duration: pass newEndTime only (rate decreases, amount stays same)
+ *       - Modify rate: pass newRate (calculates required additionalAmount)
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: integer
+ */
+streamsRouter.post(
+  "/:id/extend",
+  validateRequest({ body: extendStreamSchema }),
+  async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+    if (!req.user) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const streamId = Number(req.params.id);
+    if (!Number.isFinite(streamId) || streamId <= 0) {
+      return res.status(400).json({ error: "Invalid stream ID" });
+    }
+
+    const stream = await getStreamById(streamId);
+    if (!stream) {
+      return res.status(404).json({ error: "Stream not found" });
+    }
+
+    if (stream.status !== "active") {
+      return res
+        .status(400)
+        .json({ error: "Can only extend active streams" });
+    }
+
+    const { additionalAmount, newEndTime, newRate } = req.body;
+
+    // Calculate parameters for extend_stream
+    const currentTotal = BigInt(stream.total_amount);
+    const currentEndTs = stream.end_ts;
+    const currentStartTs = stream.start_ts;
+
+    let calcAdditionalAmount = BigInt(additionalAmount ?? "0");
+    let calcNewEndTime = newEndTime ?? currentEndTs;
+
+    // If newRate is provided, calculate the required changes
+    if (newRate) {
+      const targetRate = BigInt(newRate);
+      const duration = BigInt(calcNewEndTime - currentStartTs);
+      const targetTotal = targetRate * duration;
+      if (targetTotal > currentTotal) {
+        calcAdditionalAmount = targetTotal - currentTotal;
+      }
+      // If targetTotal < currentTotal, we can't reduce — just extend with 0 additional
+    }
+
+    // Update the DB optimistically (the on-chain tx is done by the frontend)
+    const newTotal = (currentTotal + calcAdditionalAmount).toString();
+    const newRateCalc = (
+      (currentTotal + calcAdditionalAmount) /
+      BigInt(calcNewEndTime - currentStartTs)
+    ).toString();
+
+    await updateStreamAfterExtend({
+      streamId,
+      newTotalAmount: newTotal,
+      newEndTime: calcNewEndTime,
+      newRate: newRateCalc,
+      changedBy: req.user.stellarAddress ?? req.user.id,
+    });
+
+    logger.info(
+      {
+        streamId,
+        additionalAmount: calcAdditionalAmount.toString(),
+        newEndTime: calcNewEndTime,
+      },
+      "Stream extended",
+    );
+
+    const updated = await getStreamById(streamId);
+    return res.status(200).json({ stream: updated });
+  },
+);
+
+// ── POST /streams/:id/pause ──────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /streams/{id}/pause:
+ *   post:
+ *     summary: Pause an active stream
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: integer
+ */
+streamsRouter.post(
+  "/:id/pause",
+  async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+    if (!req.user) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const streamId = Number(req.params.id);
+    if (!Number.isFinite(streamId) || streamId <= 0) {
+      return res.status(400).json({ error: "Invalid stream ID" });
+    }
+
+    const stream = await getStreamById(streamId);
+    if (!stream) {
+      return res.status(404).json({ error: "Stream not found" });
+    }
+
+    if (stream.status !== "active") {
+      return res
+        .status(400)
+        .json({ error: "Can only pause active streams" });
+    }
+
+    const updated = await updateStreamStatus({
+      streamId,
+      status: "paused",
+      changedBy: req.user.stellarAddress ?? req.user.id,
+    });
+
+    if (!updated) {
+      return res.status(500).json({ error: "Failed to pause stream" });
+    }
+
+    logger.info({ streamId }, "Stream paused");
+
+    const result = await getStreamById(streamId);
+    return res.status(200).json({ stream: result });
+  },
+);
+
+// ── POST /streams/:id/resume ─────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /streams/{id}/resume:
+ *   post:
+ *     summary: Resume a paused stream
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: integer
+ */
+streamsRouter.post(
+  "/:id/resume",
+  async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+    if (!req.user) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const streamId = Number(req.params.id);
+    if (!Number.isFinite(streamId) || streamId <= 0) {
+      return res.status(400).json({ error: "Invalid stream ID" });
+    }
+
+    const stream = await getStreamById(streamId);
+    if (!stream) {
+      return res.status(404).json({ error: "Stream not found" });
+    }
+
+    if (stream.status !== "paused") {
+      return res
+        .status(400)
+        .json({ error: "Can only resume paused streams" });
+    }
+
+    const updated = await updateStreamStatus({
+      streamId,
+      status: "active",
+      changedBy: req.user.stellarAddress ?? req.user.id,
+    });
+
+    if (!updated) {
+      return res.status(500).json({ error: "Failed to resume stream" });
+    }
+
+    logger.info({ streamId }, "Stream resumed");
+
+    const result = await getStreamById(streamId);
+    return res.status(200).json({ stream: result });
   },
 );
