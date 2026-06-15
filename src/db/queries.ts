@@ -925,6 +925,54 @@ export const upsertEmployerVerification = async (params: {
   return res.rows[0];
 };
 
+/**
+ * Update an employer's vault address after factory deployment.
+ */
+export const updateEmployerVaultAddress = async (
+  employerId: string,
+  vaultAddress: string,
+): Promise<void> => {
+  if (!getPool()) return;
+
+  await query(
+    `UPDATE employers SET vault_address = $1, updated_at = NOW()
+     WHERE employer_id = $2`,
+    [vaultAddress, employerId],
+  );
+};
+
+/**
+ * Get an employer's vault address.
+ */
+export const getEmployerVaultAddress = async (
+  employerId: string,
+): Promise<string | null> => {
+  if (!getPool()) return null;
+
+  const res = await query<{ vault_address: string | null }>(
+    `SELECT vault_address FROM employers WHERE employer_id = $1`,
+    [employerId],
+  );
+
+  return res.rows[0]?.vault_address ?? null;
+};
+
+/**
+ * Get employer by stellar address (for vault lookup by wallet).
+ */
+export const getEmployerByStellarAddress = async (
+  stellarAddress: string,
+): Promise<EmployerRecord | null> => {
+  if (!getPool()) return null;
+
+  const res = await query<EmployerRecord>(
+    `SELECT * FROM employers WHERE stellar_address = $1`,
+    [stellarAddress],
+  );
+
+  return res.rows[0] ?? null;
+};
+
 export const getActiveLiabilities = async (): Promise<TreasuryLiability[]> => {
   if (!getPool()) return [];
   const res = await query<TreasuryLiability>(

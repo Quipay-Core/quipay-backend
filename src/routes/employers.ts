@@ -17,6 +17,9 @@ import {
   recordVaultEvent,
   upsertEmployerVerification,
   updateTreasuryBalance,
+  updateEmployerVaultAddress,
+  getEmployerVaultAddress,
+  getEmployerByStellarAddress,
 } from "../db/queries";
 import { verifyBusinessRegistration } from "../services/kybService";
 import { getEmployerBalanceBase, getWorkerStreamsBase } from "../services/baseChain";
@@ -389,6 +392,90 @@ employersRouter.post(
       amount: amount.toString(),
       token,
       status: "accepted",
+    });
+  },
+);
+
+// ── POST /api/employers/vault/register ──────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/employers/vault/register:
+ *   post:
+ *     summary: Register a deployed vault address for the employer
+ *     description: >
+ *       Called after the frontend deploys a vault via the factory contract.
+ *       Stores the vault address in the DB for future reference.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               vaultAddress:
+ *                 type: string
+ *                 description: The deployed vault contract address
+ *     responses:
+ *       200:
+ *         description: Vault address registered
+ *       400:
+ *         description: Missing vault address
+ *       401:
+ *         description: Unauthorized
+ */
+employersRouter.post(
+  "/vault/register",
+  authenticateRequest,
+  requireUser,
+  async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+    if (!req.user) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { vaultAddress } = req.body;
+    if (!vaultAddress || typeof vaultAddress !== "string") {
+      return res.status(400).json({ error: "vaultAddress is required" });
+    }
+
+    await updateEmployerVaultAddress(req.user.id, vaultAddress);
+
+    return res.status(200).json({
+      employerId: req.user.id,
+      vaultAddress,
+      status: "registered",
+    });
+  },
+);
+
+// ── GET /api/employers/vault ─────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/employers/vault:
+ *   get:
+ *     summary: Get the employer's vault address
+ *     responses:
+ *       200:
+ *         description: Vault address (or null if not deployed)
+ *       401:
+ *         description: Unauthorized
+ */
+employersRouter.get(
+  "/vault",
+  authenticateRequest,
+  requireUser,
+  async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+    if (!req.user) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const vaultAddress = await getEmployerVaultAddress(req.user.id);
+
+    return res.status(200).json({
+      employerId: req.user.id,
+      vaultAddress: vaultAddress ?? null,
+      hasVault: vaultAddress !== null,
     });
   },
 );

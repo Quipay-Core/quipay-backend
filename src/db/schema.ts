@@ -219,6 +219,7 @@ export const employers = pgTable(
     contactName: text("contact_name"),
     contactEmail: text("contact_email"),
     stellarAddress: text("stellar_address").notNull().unique(),
+    vaultAddress: text("vault_address"),
     verificationStatus: text("verification_status")
       .notNull()
       .default("pending"),
