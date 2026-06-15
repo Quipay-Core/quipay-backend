@@ -22,6 +22,7 @@ export interface HealthResponseBody {
     stellarRpc: DependencyHealth;
     vault: DependencyHealth;
     nonceManager: DependencyHealth;
+    email: DependencyHealth;
   };
 }
 
@@ -217,21 +218,71 @@ async function checkNonceManager(): Promise<DependencyHealth> {
   }
 }
 
+async function checkEmail(): Promise<DependencyHealth> {
+  const startedAt = Date.now();
+  const apiKey = process.env.SENDGRID_API_KEY || "";
+  const fromEmail = process.env.SENDGRID_FROM_EMAIL || "";
+
+  if (!apiKey && !fromEmail) {
+    return {
+      status: "unhealthy",
+      latencyMs: Date.now() - startedAt,
+      details: "SENDGRID_API_KEY and SENDGRID_FROM_EMAIL not configured",
+    };
+  }
+
+  if (!apiKey) {
+    return {
+      status: "unhealthy",
+      latencyMs: Date.now() - startedAt,
+      details: "SENDGRID_API_KEY not configured",
+    };
+  }
+
+  if (!fromEmail) {
+    return {
+      status: "unhealthy",
+      latencyMs: Date.now() - startedAt,
+      details: "SENDGRID_FROM_EMAIL not configured",
+    };
+  }
+
+  // Basic format check
+  if (!apiKey.startsWith("SG.")) {
+    return {
+      status: "unhealthy",
+      latencyMs: Date.now() - startedAt,
+      details: "SENDGRID_API_KEY format invalid (should start with SG.)",
+    };
+  }
+
+  return {
+    status: "healthy",
+    latencyMs: Date.now() - startedAt,
+    details: `from=${fromEmail}`,
+  };
+}
+
 export async function getHealthResponse(
   startTimeMs: number,
 ): Promise<{ httpStatus: 200 | 503; body: HealthResponseBody }> {
-  const [database, stellarRpc, vault, nonceManagerHealth] = await Promise.all([
-    checkDatabase(),
-    checkStellarRpc(),
-    checkVault(),
-    checkNonceManager(),
-  ]);
+  const [database, stellarRpc, vault, nonceManagerHealth, email] =
+    await Promise.all([
+      checkDatabase(),
+      checkStellarRpc(),
+      checkVault(),
+      checkNonceManager(),
+      checkEmail(),
+    ]);
 
   const allHealthy =
     database.status === "healthy" &&
     stellarRpc.status === "healthy" &&
     vault.status === "healthy" &&
     nonceManagerHealth.status === "healthy";
+
+  // Email is informational — doesn't affect overall health status
+  // (emails failing is bad but shouldn't mark the whole service as down)
 
   const body: HealthResponseBody = {
     status: allHealthy ? "ok" : "degraded",
@@ -244,6 +295,7 @@ export async function getHealthResponse(
       stellarRpc,
       vault,
       nonceManager: nonceManagerHealth,
+      email,
     },
   };
 
